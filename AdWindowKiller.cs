@@ -1,15 +1,17 @@
-﻿using System;
+using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 
 namespace OcamLauncher
 {
     static class AdWindowKiller
     {
-        #region 常量定义
+        #region Constants
 
         private const int SW_HIDE = 0;
+        private const int SW_RESTORE = 9;
         private const uint EVENT_OBJECT_SHOW = 0x8002;
         private const uint WINEVENT_OUTOFCONTEXT = 0x0000;
         private const uint SWP_NOZORDER = 0x0004;
@@ -19,7 +21,7 @@ namespace OcamLauncher
         private const int SM_CYSCREEN = 1;
         private const int GWL_STYLE = -16;
         private const int GWL_EXSTYLE = -20;
-        private const int MaxRetries = 50;
+        private const int MaxRetries = 500;
         private const int RetryIntervalMs = 100;
         private const int ProcessNotFoundThreshold = 3;
         private const int PollingIntervalMs = 50;
@@ -28,23 +30,20 @@ namespace OcamLauncher
 
         #endregion
 
-        #region 字段
+        #region Fields
 
-        private static string _targetProcessName = null;
+        private static string _targetProcessName;
         private static IntPtr _hookHandle = IntPtr.Zero;
         private static WinEventDelegate _winEventDelegate;
 
         #endregion
 
-        #region 公共方法
+        #region Public Methods
 
         public static void ResizeAndCenterWindow(string processName, string className, int width, int height)
         {
-            if (string.IsNullOrEmpty(processName) || processName.Trim().Length == 0)
-            {
-                Console.WriteLine("警告：进程名称不能为空");
+            if (string.IsNullOrEmpty(processName))
                 return;
-            }
 
             string targetProcess = processName.Replace(".exe", "");
 
@@ -69,15 +68,13 @@ namespace OcamLauncher
                         }
                     }
                 }
-                catch (Exception ex)
+                catch
                 {
-                    Console.WriteLine($"调整窗口时发生错误：{ex.Message}");
+                    // 忽略查找过程中的异常
                 }
 
                 Thread.Sleep(RetryIntervalMs);
             }
-
-            Console.WriteLine($"警告：未找到类名为 '{className}' 的窗口");
         }
 
         public static void MonitorByProcessName(string processName)
@@ -87,12 +84,9 @@ namespace OcamLauncher
 
             if (!InstallEventHook())
             {
-                Console.WriteLine("警告：无法安装窗口事件钩子，使用轮询模式");
                 MonitorByPolling();
                 return;
             }
-
-            Console.WriteLine("事件钩子已安装，正在监控...");
 
             Thread monitorThread = new Thread(MonitorProcessExit)
             {
@@ -101,13 +95,12 @@ namespace OcamLauncher
             monitorThread.Start();
 
             RunMessageLoop();
-
             CleanupHook();
         }
 
         #endregion
 
-        #region 私有方法
+        #region Private Methods
 
         private static IntPtr FindWindowByProcessAndClass(int processId, string className)
         {
@@ -133,12 +126,12 @@ namespace OcamLauncher
 
         private static void SetWindowCentered(IntPtr hWnd, int clientWidth, int clientHeight)
         {
-            // 先恢复窗口到正常状态
-            ShowWindow(hWnd, 9); // SW_RESTORE = 9
+            ShowWindow(hWnd, SW_RESTORE);
 
-            int style = GetWindowLong(hWnd, GWL_STYLE);
-            int exStyle = GetWindowLong(hWnd, GWL_EXSTYLE);
+            int style = (int)GetWindowLongPtr(hWnd, GWL_STYLE);
+            int exStyle = (int)GetWindowLongPtr(hWnd, GWL_EXSTYLE);
 
+            // 计算包含边框和标题栏的完整窗口大小
             RECT rect = new RECT { Left = 0, Top = 0, Right = clientWidth, Bottom = clientHeight };
             AdjustWindowRectEx(ref rect, style, false, exStyle);
 
@@ -152,8 +145,6 @@ namespace OcamLauncher
 
             SetWindowPos(hWnd, IntPtr.Zero, x, y, actualWidth, actualHeight,
                 SWP_NOZORDER | SWP_SHOWWINDOW | SWP_FRAMECHANGED);
-
-            Console.WriteLine($"已调整窗口客户区尺寸为 {clientWidth}x{clientHeight}，实际窗口尺寸为 {actualWidth}x{actualHeight}");
         }
 
         private static bool InstallEventHook()
@@ -313,14 +304,14 @@ namespace OcamLauncher
 
         private static string GetClassNameValue(IntPtr hWnd)
         {
-            System.Text.StringBuilder sb = new System.Text.StringBuilder(ClassNameBufferCapacity);
+            StringBuilder sb = new StringBuilder(ClassNameBufferCapacity);
             GetClassName(hWnd, sb, sb.Capacity);
             return sb.ToString();
         }
 
         #endregion
 
-        #region P/Invoke 声明
+        #region P/Invoke Declarations
 
         [StructLayout(LayoutKind.Sequential)]
         private struct MSG
@@ -380,7 +371,7 @@ namespace OcamLauncher
         private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out int lpdwProcessId);
 
         [DllImport("user32.dll", CharSet = CharSet.Auto)]
-        private static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder lpClassName, int nMaxCount);
+        private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
 
         [DllImport("user32.dll")]
         private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
@@ -392,8 +383,16 @@ namespace OcamLauncher
         [DllImport("user32.dll")]
         private static extern int GetSystemMetrics(int nIndex);
 
-        [DllImport("user32.dll", SetLastError = true)]
-        private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+        [DllImport("user32.dll", EntryPoint = "GetWindowLong")]
+        private static extern IntPtr GetWindowLong32(IntPtr hWnd, int nIndex);
+
+        [DllImport("user32.dll", EntryPoint = "GetWindowLongPtr")]
+        private static extern IntPtr GetWindowLong64(IntPtr hWnd, int nIndex);
+
+        private static IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex)
+        {
+            return IntPtr.Size == 8 ? GetWindowLong64(hWnd, nIndex) : GetWindowLong32(hWnd, nIndex);
+        }
 
         [DllImport("user32.dll")]
         private static extern bool AdjustWindowRectEx(ref RECT lpRect, int dwStyle, bool bMenu, int dwExStyle);
